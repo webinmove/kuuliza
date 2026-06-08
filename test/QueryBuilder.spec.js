@@ -1,8 +1,8 @@
-import { Op } from 'sequelize';
+import Sequelize, { Op } from 'sequelize';
 import chai from 'chai';
 import QueryBuilderClass from '../src/index.js';
 const { expect } = chai;
-const QueryBuilder = QueryBuilderClass.init(Op);
+const QueryBuilder = QueryBuilderClass.init(Sequelize);
 
 describe('Build Query', () => {
   const date = Date.now();
@@ -31,7 +31,7 @@ describe('Build Query', () => {
   const emptyQuery = QueryBuilder.build({});
 
   it('1. Attributes should be undefined', () => {
-    expect(query.attributes).to.be.undefined;
+    expect(query.attributes).to.equal(undefined);
   });
 
   it('2. Nested range should equal', () => {
@@ -59,11 +59,11 @@ describe('Build Query', () => {
   });
 
   it('7. Is null column value should return null', () => {
-    expect(query.where?.assignations?.[Op.and]?.[0]?.[Op.is]).is.null;
+    expect(query.where?.assignations?.[Op.and]?.[0]?.[Op.is]).to.equal(null);
   });
 
   it('8. Not null column value should equal', () => {
-    expect(query.where?.companyIdentifier?.[Op.and]?.[0]?.[Op.not]).is.null;
+    expect(query.where?.companyIdentifier?.[Op.and]?.[0]?.[Op.not]).to.equal(null);
   });
 
   it('9. Order should equal', () => {
@@ -78,5 +78,37 @@ describe('Build Query', () => {
       limit: 100,
       offset: 0
     });
+  });
+
+  it('11. Empty string is an equality filter, not IS NULL', () => {
+    expect(query.where?.alertLastStatus?.[Op.eq]).to.deep.equal('');
+  });
+
+  it('12. Falsy values (0, false) are equality filters, not IS NULL', () => {
+    const falsy = QueryBuilder.build({ filters: { quantity: 0, archived: false } });
+    expect(falsy.where?.quantity?.[Op.eq]).to.deep.equal(0);
+    expect(falsy.where?.archived?.[Op.eq]).to.deep.equal(false);
+  });
+
+  it('13. Null filter value maps to IS NULL', () => {
+    const q = QueryBuilder.build({ filters: { archivedAt: null } });
+    expect(q.where.archivedAt).to.equal(null);
+  });
+});
+
+describe('Operators and init', () => {
+  it('getSequelizeOpByString maps every supported operator', () => {
+    const ops = [
+      'eq', 'ne', 'or', 'gt', 'gte', 'lt', 'lte', 'in', 'not', 'notIn',
+      'overlap', 'like', 'notLike', 'iLike', 'notILike', 'between', 'notBetween', 'is'
+    ];
+    ops.forEach((op) => {
+      expect(QueryBuilder.getSequelizeOpByString(op)).to.equal(Op[op]);
+    });
+    expect(QueryBuilder.getSequelizeOpByString('nope')).to.equal(undefined);
+  });
+
+  it('init requires an argument', () => {
+    expect(() => QueryBuilderClass.init()).to.throw(/Sequelize Operators are required/);
   });
 });

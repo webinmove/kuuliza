@@ -1,4 +1,28 @@
-.DS_Store
+# Build
 dist
 
-node_modules
+# Node modules
+node_modules/
+
+# Code coverage reports
+coverage/
+
+# MacOS system files
+.DS_Store
+
+# .env files
+.env
+
+# Override of docker-compose for local development
+docker-compose.override.yml
+
+# Editors and IDEs
+.vscode/
+.idea/
+
+# LLMs configs
+.llmrc
+.claude
+
+# Force local node
+.node-version

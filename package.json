@@ -75,12 +75,12 @@
   },
   "devDependencies": {
     "c8": "11.0.0",
-    "chai": "4.0.0",
-    "mocha": "7.2.0",
+    "chai": "6.2.2",
+    "mocha": "11.7.6",
     "mocha-standard": "1.0.0",
-    "rollup": "4.60.1",
+    "rollup": "4.61.1",
     "semistandard": "17.0.0",
     "sequelize": "6.37.8",
-    "snazzy": "7.0.0"
+    "snazzy": "9.0.0"
   }
 }

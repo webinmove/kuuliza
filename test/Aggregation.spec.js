@@ -1,7 +1,6 @@
 import Sequelize, { Op } from 'sequelize';
-import chai from 'chai';
+import { expect } from 'chai';
 import QueryBuilderClass from '../src/index.js';
-const { expect } = chai;
 const QueryBuilder = QueryBuilderClass.init(Sequelize);
 
 describe('init', () => {

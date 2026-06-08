@@ -138,6 +138,30 @@ describe('integration: real PostgreSQL', () => {
       expect(region).to.equal('EU');
     });
 
+    it('gt / lt / lte operators', async () => {
+      expect(await find({ filters: { amount: { gt: 110 } } })).to.have.length(2);
+      expect(await find({ filters: { amount: { lt: 80 } } })).to.have.length(2);
+      expect(await find({ filters: { amount: { lte: 80 } } })).to.have.length(3);
+    });
+
+    it('notIn operator', async () => {
+      expect(await find({ filters: { brand: { notIn: ['Nike'] } } })).to.have.length(4);
+    });
+
+    it('like / notLike / notILike operators', async () => {
+      expect(await find({ filters: { brand: { like: 'Nike' } } })).to.have.length(4);
+      expect(await find({ filters: { color: { notLike: 'Red' } } })).to.have.length(3);
+      expect(await find({ filters: { color: { notILike: '%red%' } } })).to.have.length(3);
+    });
+
+    it('notBetween operator', async () => {
+      expect(await find({ filters: { amount: { notBetween: [80, 110] } } })).to.have.length(4);
+    });
+
+    it('or operator', async () => {
+      expect(await find({ filters: { amount: { or: [60, 130] } } })).to.have.length(2);
+    });
+
     it('combined filters (AND)', async () => {
       const rows = await find({ filters: { brand: 'Nike', color: 'Red' } });
       expect(rows).to.have.length(3);
@@ -240,6 +264,16 @@ describe('integration: real PostgreSQL', () => {
       expect(byBrand.Nike.count).to.equal(3); // archived Nike excluded by filter
       expect(byBrand.Adidas.count).to.equal(2);
     });
+
+    it('count over a specific field (COUNT(col)) ignores nulls', async () => {
+      const [row] = await run({ metrics: { promos: { fn: 'count', field: 'promoCode' } } });
+      expect(row.promos).to.equal(2); // only 2 rows have a promoCode
+    });
+
+    it('sort by a groupBy dimension', async () => {
+      const rows = await run({ groupBy: 'brand', metrics: { count: 'count' }, sort: [{ brand: 'ASC' }] });
+      expect(rows.map((r) => r.brand)).to.deep.equal(['Adidas', 'Nike', 'Puma']);
+    });
   });
 
   // --- coerceNumbers ---------------------------------------------------------
@@ -339,6 +373,12 @@ describe('integration: real PostgreSQL', () => {
       expect(colors.Blue.count).to.equal(3);
       expect(response.stats.amount).to.deep.include({ min: 60, max: 130, count: 8 });
       expect(response.stats.amount.avg).to.equal(95);
+    });
+
+    it('facet with omitted type defaults to terms', async () => {
+      const response = await runSearch({ facets: { color: {} } });
+      expect(response.facets.color).to.be.an('array');
+      expect(response.facets.color[0].count).to.be.a('number');
     });
 
     it('assembles the stable envelope with numeric facet counts', async () => {

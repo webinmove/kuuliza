@@ -162,6 +162,15 @@ describe('integration: real PostgreSQL', () => {
       expect(await find({ filters: { amount: { or: [60, 130] } } })).to.have.length(2);
     });
 
+    it('bare null filter maps to IS NULL', async () => {
+      expect(await find({ filters: { promoCode: null } })).to.have.length(6);
+    });
+
+    it('nested operator forms (eq, in)', async () => {
+      expect(await find({ filters: { amount: { eq: 100 } } })).to.have.length(1);
+      expect(await find({ filters: { size: { in: ['41', '43'] } } })).to.have.length(4);
+    });
+
     it('combined filters (AND)', async () => {
       const rows = await find({ filters: { brand: 'Nike', color: 'Red' } });
       expect(rows).to.have.length(3);
@@ -274,6 +283,16 @@ describe('integration: real PostgreSQL', () => {
       const rows = await run({ groupBy: 'brand', metrics: { count: 'count' }, sort: [{ brand: 'ASC' }] });
       expect(rows.map((r) => r.brand)).to.deep.equal(['Adidas', 'Nike', 'Puma']);
     });
+
+    it('multi-predicate HAVING combines with AND', async () => {
+      const rows = await run({
+        groupBy: 'brand',
+        metrics: { count: 'count', total: { fn: 'sum', field: 'amount' } },
+        having: { count: { gte: 2 }, total: { gte: 300 } }
+      });
+      expect(rows).to.have.length(1); // Nike(4,440); Adidas(2,190) & Puma(2,130) fail total>=300
+      expect(rows[0].brand).to.equal('Nike');
+    });
   });
 
   // --- coerceNumbers ---------------------------------------------------------
@@ -373,6 +392,14 @@ describe('integration: real PostgreSQL', () => {
       expect(colors.Blue.count).to.equal(3);
       expect(response.stats.amount).to.deep.include({ min: 60, max: 130, count: 8 });
       expect(response.stats.amount.avg).to.equal(95);
+    });
+
+    it('stats facet over an empty result set returns null stats', async () => {
+      const response = await runSearch({ filters: { brand: 'Reebok' }, facets: { amount: { type: 'stats' } } });
+      expect(response.total).to.equal(0);
+      expect(response.stats.amount.count).to.equal(0);
+      expect(response.stats.amount.min).to.equal(null);
+      expect(response.stats.amount.avg).to.equal(null);
     });
 
     it('facet with omitted type defaults to terms', async () => {

@@ -14,7 +14,8 @@
     "test:lint": "semistandard --verbose | snazzy",
     "test:cover": "c8 npm run test:spec",
     "test:integration": "LOG_LEVEL=fatal mocha \"test/integration/**/*.spec.js\" --timeout 120000",
-    "test:integration:cover": "c8 --check-coverage=false --reporter=text-summary npm run test:integration",
+    "test:integration:cover": "c8 --check-coverage --lines 92 --statements 92 --branches 80 --functions 100 --reporter=text-summary npm run test:integration",
+    "test:cover:all": "LOG_LEVEL=fatal c8 mocha \"test/*.spec.js\" \"test/integration/**/*.spec.js\" --timeout 120000",
     "test": "npm run test:lint && npm run test:cover"
   },
   "exports": {

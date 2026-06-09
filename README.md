@@ -83,7 +83,9 @@ Filters support the following operators as object keys:
 - `between` `notBetween` — range
 - `overlap` — array overlap
 - `is` `not` — null checks (use `{ is: null }` or `{ not: null }`)
-- `or` — OR condition
+- `or` — OR condition. Takes an array of values/predicates, e.g. `{ or: [60, 130] }` or
+  `{ or: [{ gt: 100 }, { lt: 10 }] }`. A single nested operator object (`{ or: { gt: 1 } }`)
+  is also accepted.
 
 Nested objects (e.g. JSON columns) are supported — each key in the nested object is treated as a sub-filter.
 
@@ -137,7 +139,10 @@ const rows = await MyModel.findAll(options);
 
 - **Aggregate functions:** `count`, `countDistinct`, `sum`, `avg`, `min`, `max`. `count`
   with no `field` is `COUNT(*)`; the others require a `field`.
-- **Date intervals:** `hour`, `day`, `week`, `month`, `quarter`, `year`.
+- **Date intervals:** `hour`, `day`, `week`, `month`, `quarter`, `year`. The date-bucket
+  form takes an optional `timezone` (`{ field, interval, timezone }`, default `'UTC'`) so
+  `DATE_TRUNC` boundaries are deterministic regardless of the DB session timezone —
+  requires PostgreSQL 14+.
 - **Numbers come back as strings** (Postgres returns aggregates as strings under `raw`).
   Pass them through `coerceAggregation()` to turn `count`/`sum`/`avg` into JS numbers
   (`min`/`max` are left untouched — they are type‑ambiguous):
@@ -147,6 +152,34 @@ const rows = await MyModel.findAll(options);
   ```
 - `size` limits the number of **groups returned**, not the query cost — it is not DoS
   protection.
+
+### `fieldMap` — snake_case / `underscored` models
+
+kuuliza wraps metric targets and date-bucket fields in `col()`, which emits the name
+**verbatim** — it does not resolve a Sequelize model's `field:` mapping. If your model is
+`underscored` (or otherwise maps camelCase attributes to snake_case columns), pass
+`fieldMap: { attribute: dbColumn }` so those `col()` identifiers target the real column:
+
+```js
+// Model: { distributionRequestShortId: { field: 'distribution_request_short_id' }, ... }
+const fieldMap = Object.fromEntries(
+  Object.entries(Model.rawAttributes).map(([attr, def]) => [attr, def.field || attr])
+);
+
+QueryBuilder.buildAggregation({
+  groupBy: { field: 'createdAt', interval: 'day' },             // bucket on created_at
+  metrics: { uniq: { fn: 'countDistinct', field: 'titleId' } }, // COUNT(DISTINCT title_id)
+  fieldMap                                                      // { createdAt:'created_at', titleId:'title_id', … }
+});
+// date-bucket rows still come back keyed by the attribute name (`createdAt`), not the column.
+```
+
+- **Plain `groupBy` dimensions need no entry** — they are emitted as bare attribute strings,
+  which Sequelize maps to columns (`GROUP BY` then references the output alias).
+- Only **metric fields** (`{ fn, field }`), **date-bucket fields**, and **facet fields**
+  (terms value/group, stats min/max/avg) are resolved through `fieldMap`.
+- `filters` and disjunctive-facet drops always key on the **attribute** name (Sequelize maps
+  those), so they ignore `fieldMap`. `buildSearch()` accepts the same `fieldMap`.
 
 ## Faceted search
 

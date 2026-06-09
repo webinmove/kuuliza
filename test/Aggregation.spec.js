@@ -275,6 +275,156 @@ describe('buildAggregation', () => {
   });
 });
 
+describe('buildAggregation hardening', () => {
+  it('throws on duplicate groupBy dimension names (silent overwrite under raw)', () => {
+    expect(() => QueryBuilder.buildAggregation({
+      groupBy: [{ field: 'createdAt', interval: 'month' }, 'createdAt'],
+      metrics: { c: 'count' }
+    })).to.throw(/duplicate|collide/i);
+    expect(() => QueryBuilder.buildAggregation({
+      groupBy: ['status', 'status'],
+      metrics: { c: 'count' }
+    })).to.throw(/duplicate|collide/i);
+  });
+
+  it('rejects a prototype-chain key as an aggregate function', () => {
+    expect(() => QueryBuilder.buildAggregation({
+      groupBy: 'status', metrics: { x: { fn: 'constructor', field: 'a' } }
+    })).to.throw(/Unsupported aggregate function/);
+    expect(() => QueryBuilder.buildAggregation({
+      groupBy: 'status', metrics: { x: { fn: 'toString', field: 'a' } }
+    })).to.throw(/Unsupported aggregate function/);
+  });
+
+  it('throws on a non-object having predicate', () => {
+    expect(() => QueryBuilder.buildAggregation({
+      groupBy: 'status', metrics: { count: 'count' }, having: { count: 5 }
+    })).to.throw(/having predicate/);
+    expect(() => QueryBuilder.buildAggregation({
+      groupBy: 'status', metrics: { count: 'count' }, having: { count: null }
+    })).to.throw(/having predicate/);
+  });
+
+  it('rejects a non-comparison having operator', () => {
+    expect(() => QueryBuilder.buildAggregation({
+      groupBy: 'status', metrics: { count: 'count' }, having: { count: { is: null } }
+    })).to.throw(/Unsupported having operator/);
+  });
+});
+
+describe('buildAggregation date-bucket timezone', () => {
+  it('defaults DATE_TRUNC to UTC', () => {
+    const result = QueryBuilder.buildAggregation({
+      groupBy: { field: 'createdAt', interval: 'month' }, metrics: { count: 'count' }
+    });
+    const expr = result.attributes[0][0];
+    expect(expr.fn).to.equal('DATE_TRUNC');
+    expect(expr.args[2]).to.equal('UTC');
+  });
+
+  it('honours an explicit timezone override', () => {
+    const result = QueryBuilder.buildAggregation({
+      groupBy: { field: 'createdAt', interval: 'day', timezone: 'Europe/Paris' }, metrics: { count: 'count' }
+    });
+    expect(result.attributes[0][0].args[2]).to.equal('Europe/Paris');
+  });
+});
+
+describe('buildAggregation fieldMap value validation', () => {
+  it('ignores a non-string fieldMap value and falls back to the attribute', () => {
+    const result = QueryBuilder.buildAggregation({
+      groupBy: 'status', metrics: { x: { fn: 'sum', field: 'amt' } }, fieldMap: { amt: 123 }
+    });
+    expect(result.attributes[1][0].args[0].col).to.equal('amt');
+  });
+
+  it('ignores an empty-string fieldMap value', () => {
+    const result = QueryBuilder.buildAggregation({
+      groupBy: 'status', metrics: { x: { fn: 'sum', field: 'amt' } }, fieldMap: { amt: '' }
+    });
+    expect(result.attributes[1][0].args[0].col).to.equal('amt');
+  });
+});
+
+describe('buildAggregation paging', () => {
+  it('omits limit/offset when neither size nor from is given (returns all groups)', () => {
+    const result = QueryBuilder.buildAggregation({ groupBy: 'status', metrics: { count: 'count' } });
+    expect(result.limit).to.equal(undefined);
+    expect(result.offset).to.equal(undefined);
+  });
+
+  it('applies limit and offset when size and from are given', () => {
+    const result = QueryBuilder.buildAggregation({ groupBy: 'status', metrics: { count: 'count' }, from: 5, size: 10 });
+    expect(result.limit).to.equal(10);
+    expect(result.offset).to.equal(5);
+  });
+
+  it('applies only limit when size is given without from', () => {
+    const result = QueryBuilder.buildAggregation({ groupBy: 'status', metrics: { count: 'count' }, size: 3 });
+    expect(result.limit).to.equal(3);
+    expect(result.offset).to.equal(undefined);
+  });
+});
+
+describe('buildAggregation fieldMap (attribute -> DB column)', () => {
+  it('maps a sum metric field through fieldMap', () => {
+    const result = QueryBuilder.buildAggregation({
+      groupBy: 'status',
+      metrics: { revenue: { fn: 'sum', field: 'titleId' } },
+      fieldMap: { titleId: 'title_id' }
+    });
+    expect(result.attributes[1][0].args[0].col).to.equal('title_id');
+  });
+
+  it('maps a countDistinct field through fieldMap', () => {
+    const result = QueryBuilder.buildAggregation({
+      groupBy: 'status',
+      metrics: { u: { fn: 'countDistinct', field: 'requestShortId' } },
+      fieldMap: { requestShortId: 'request_short_id' }
+    });
+    expect(result.attributes[1][0].args[0].args[0].col).to.equal('request_short_id');
+  });
+
+  it('maps COUNT(field) through fieldMap', () => {
+    const result = QueryBuilder.buildAggregation({
+      groupBy: 'status',
+      metrics: { rows: { fn: 'count', field: 'titleId' } },
+      fieldMap: { titleId: 'title_id' }
+    });
+    expect(result.attributes[1][0].args[0].col).to.equal('title_id');
+  });
+
+  it('maps a date-bucket field but keeps the attribute alias as the output key', () => {
+    const result = QueryBuilder.buildAggregation({
+      groupBy: { field: 'createdAt', interval: 'month' },
+      metrics: { count: 'count' },
+      fieldMap: { createdAt: 'created_at' }
+    });
+    const [bucketExpr, bucketAlias] = result.attributes[0];
+    expect(bucketAlias).to.equal('createdAt');
+    expect(bucketExpr.args[1].col).to.equal('created_at');
+  });
+
+  it('leaves a field unchanged when fieldMap has no entry for it', () => {
+    const result = QueryBuilder.buildAggregation({
+      groupBy: 'status',
+      metrics: { revenue: { fn: 'sum', field: 'amount' } },
+      fieldMap: { other: 'x' }
+    });
+    expect(result.attributes[1][0].args[0].col).to.equal('amount');
+  });
+
+  it('does not map plain groupBy dimensions (Sequelize maps the bare attribute)', () => {
+    const result = QueryBuilder.buildAggregation({
+      groupBy: ['requestShortId'],
+      metrics: { count: 'count' },
+      fieldMap: { requestShortId: 'request_short_id' }
+    });
+    expect(result.attributes[0]).to.equal('requestShortId');
+    expect(result.group).to.deep.equal(['requestShortId']);
+  });
+});
+
 describe('coerceAggregation', () => {
   const params = {
     groupBy: 'status',

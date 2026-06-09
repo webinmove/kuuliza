@@ -3,9 +3,10 @@
 // DATE_TRUNC buckets, paranoid exclusion, HAVING, ORDER BY alias, string-typed metrics ->
 // coercion, and disjunctive facet counts — and that the results are numerically accurate.
 //
-// NOTE: aggregation/facet field names must equal the DB column names — kuuliza is
-// schema-agnostic and passes them straight to sequelize.col(), which does NOT resolve a
-// model's `field:` mapping. The fixture model below keeps attribute === column.
+// NOTE: the main fixture below keeps attribute === column, so it omits fieldMap. A
+// model whose attributes differ from their DB columns (underscored snake_case) passes
+// `fieldMap: { attr: dbColumn }` so col() targets the real column — see the dedicated
+// "fieldMap on an underscored model" suite at the bottom.
 import { expect } from 'chai';
 import Sequelize, { DataTypes } from 'sequelize';
 import { PostgreSqlContainer } from '@testcontainers/postgresql';
@@ -414,5 +415,164 @@ describe('integration: real PostgreSQL', () => {
       expect(response.total).to.equal(8);
       expect(response.facets.brand[0].count).to.be.a('number');
     });
+  });
+});
+
+// fieldMap: prove aggregations/facets work on an `underscored` model whose
+// attributes (camelCase) differ from their DB columns (snake_case). Without a
+// fieldMap, col() emits the attribute verbatim and Postgres throws
+// errorMissingColumn — these tests would fail. Plain groupBy dimensions need no
+// map (Sequelize maps the bare attribute + GROUP BY by output alias).
+describe('integration: fieldMap on an underscored model', () => {
+  let container;
+  let sequelize;
+  let Event;
+  let QueryBuilder;
+  let fieldMap;
+
+  const SEED = [
+    { requestShortId: 'R1', status: 'active', amount: 100, soldAt: '2026-01-10' },
+    { requestShortId: 'R2', status: 'active', amount: 50, soldAt: '2026-01-20' },
+    { requestShortId: 'R3', status: 'active', amount: 70, soldAt: '2026-02-05' },
+    { requestShortId: 'R1', status: 'done', amount: 30, soldAt: '2026-02-10' },
+    { requestShortId: 'R2', status: 'done', amount: 20, soldAt: '2026-02-12' }
+  ];
+
+  before(async () => {
+    container = await new PostgreSqlContainer('postgres:16-alpine').start();
+    sequelize = new Sequelize(container.getConnectionUri(), { dialect: 'postgres', logging: false, timezone: '+00:00' });
+    QueryBuilder = QueryBuilderClass.init(Sequelize);
+
+    Event = sequelize.define('events', {
+      requestShortId: { type: DataTypes.TEXT, field: 'request_short_id' },
+      status: { type: DataTypes.TEXT, field: 'status' },
+      amount: { type: DataTypes.DECIMAL(10, 2), field: 'amount' },
+      soldAt: { type: DataTypes.DATE, field: 'sold_at' }
+    }, { underscored: true });
+
+    // Derive { attribute: dbColumn } from the model, like a real consumer would.
+    fieldMap = Object.fromEntries(
+      Object.entries(Event.rawAttributes).map(([attr, def]) => [attr, (def && def.field) || attr])
+    );
+
+    await sequelize.sync({ force: true });
+    await Event.bulkCreate(SEED);
+  });
+
+  after(async () => {
+    if (sequelize) await sequelize.close();
+    if (container) await container.stop();
+  });
+
+  const run = async (params) =>
+    QueryBuilder.coerceAggregation(await Event.findAll(QueryBuilder.buildAggregation(params)), params);
+
+  it('countDistinct over a snake_case field via fieldMap', async () => {
+    const byStatus = await run({
+      groupBy: 'status',
+      metrics: { reqs: { fn: 'countDistinct', field: 'requestShortId' } },
+      fieldMap
+    }).then((rows) => rows.reduce((a, r) => { a[r.status] = r.reqs; return a; }, {}));
+    expect(byStatus.active).to.equal(3); // R1, R2, R3
+    expect(byStatus.done).to.equal(2); // R1, R2
+  });
+
+  it('sum over a snake_case field via fieldMap', async () => {
+    const [row] = await run({ metrics: { total: { fn: 'sum', field: 'amount' } }, fieldMap });
+    expect(row.total).to.equal(270);
+  });
+
+  it('date-bucket on a snake_case field keeps the camelCase output key', async () => {
+    const byMonth = await run({
+      groupBy: { field: 'soldAt', interval: 'month' },
+      metrics: { count: 'count', total: { fn: 'sum', field: 'amount' } },
+      fieldMap
+    }).then((rows) => rows.reduce((a, r) => { a[r.soldAt.toISOString().slice(0, 7)] = r; return a; }, {}));
+    expect(byMonth['2026-01']).to.include({ count: 2, total: 150 });
+    expect(byMonth['2026-02']).to.include({ count: 3, total: 120 });
+  });
+
+  it('plain groupBy on a snake_case attribute works without a fieldMap entry for it', async () => {
+    const byReq = await run({ groupBy: 'requestShortId', metrics: { count: 'count' } })
+      .then((rows) => rows.reduce((a, r) => { a[r.requestShortId] = r.count; return a; }, {}));
+    expect(byReq.R1).to.equal(2);
+    expect(byReq.R2).to.equal(2);
+    expect(byReq.R3).to.equal(1);
+  });
+
+  it('without a fieldMap, a metric over a snake_case field throws errorMissingColumn', async () => {
+    let err;
+    try {
+      await Event.findAll(QueryBuilder.buildAggregation({
+        metrics: { reqs: { fn: 'countDistinct', field: 'requestShortId' } }
+      }));
+    } catch (e) {
+      err = e;
+    }
+    expect(err).to.be.an('error');
+    expect(err.original?.routine || err.parent?.routine).to.equal('errorMissingColumn');
+  });
+
+  it('terms facet on a snake_case field via fieldMap', async () => {
+    const spec = QueryBuilder.buildSearch({ facets: { requestShortId: { type: 'terms' } }, fieldMap });
+    const rows = await Event.findAll(spec.facets[0].options);
+    const response = QueryBuilder.assembleSearch({
+      hits: [],
+      total: 0,
+      facetResults: [{ name: spec.facets[0].name, type: 'terms', rows }]
+    });
+    const counts = response.facets.requestShortId.reduce((a, r) => { a[r.value] = r.count; return a; }, {});
+    expect(counts).to.deep.equal({ R1: 2, R2: 2, R3: 1 });
+  });
+
+  it('stats facet on a snake_case field via fieldMap', async () => {
+    const spec = QueryBuilder.buildSearch({ facets: { amount: { type: 'stats' } }, fieldMap });
+    const rows = await Event.findAll(spec.facets[0].options);
+    const response = QueryBuilder.assembleSearch({
+      hits: [], total: 0, facetResults: [{ name: 'amount', type: 'stats', rows }]
+    });
+    expect(response.stats.amount).to.deep.include({ min: 20, max: 100, count: 5 });
+  });
+});
+
+// date-bucket timezone: prove buckets are pinned to the chosen zone regardless of the
+// DB session timezone. The session below is Asia/Karachi (+05); two timestamps straddle
+// a UTC day boundary but fall in the SAME Karachi day.
+describe('integration: date-bucket timezone independence', () => {
+  let container;
+  let sequelize;
+  let Tz;
+  let QueryBuilder;
+
+  before(async () => {
+    container = await new PostgreSqlContainer('postgres:16-alpine').start();
+    sequelize = new Sequelize(container.getConnectionUri(), { dialect: 'postgres', logging: false, timezone: 'Asia/Karachi' });
+    QueryBuilder = QueryBuilderClass.init(Sequelize);
+    Tz = sequelize.define('tzrows', { ts: DataTypes.DATE }, { timestamps: false });
+    await sequelize.sync({ force: true });
+    await Tz.bulkCreate([
+      { ts: '2026-01-01T21:00:00Z' }, // UTC day 01-01 ; Karachi 01-02 02:00
+      { ts: '2026-01-02T01:00:00Z' } //  UTC day 01-02 ; Karachi 01-02 06:00
+    ]);
+  });
+
+  after(async () => {
+    if (sequelize) await sequelize.close();
+    if (container) await container.stop();
+  });
+
+  it('default UTC buckets ignore the non-UTC session (two distinct days)', async () => {
+    const rows = await Tz.findAll(QueryBuilder.buildAggregation({
+      groupBy: { field: 'ts', interval: 'day' }, metrics: { count: 'count' }
+    }));
+    expect(rows).to.have.length(2);
+  });
+
+  it('an explicit timezone override changes the bucketing (one shared day)', async () => {
+    const rows = QueryBuilder.coerceAggregation(await Tz.findAll(QueryBuilder.buildAggregation({
+      groupBy: { field: 'ts', interval: 'day', timezone: 'Asia/Karachi' }, metrics: { count: 'count' }
+    })), { metrics: { count: 'count' } });
+    expect(rows).to.have.length(1);
+    expect(rows[0].count).to.equal(2);
   });
 });

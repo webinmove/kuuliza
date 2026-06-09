@@ -111,3 +111,52 @@ describe('Operators and init', () => {
     expect(() => QueryBuilderClass.init()).to.throw(/Sequelize Operators are required/);
   });
 });
+
+describe('Hardening: sort validation', () => {
+  it('throws a clean error on a non-string sort direction', () => {
+    expect(() => QueryBuilder.build({ sort: [{ a: 1 }] })).to.throw(/sort direction/);
+    expect(() => QueryBuilder.build({ sort: [{ a: null }] })).to.throw(/sort direction/);
+  });
+
+  it('throws on an invalid direction keyword', () => {
+    expect(() => QueryBuilder.build({ sort: [{ a: 'banana' }] })).to.throw(/sort direction/);
+  });
+
+  it('throws when sort is not an array', () => {
+    expect(() => QueryBuilder.build({ sort: { a: 'asc' } })).to.throw(/sort must be an array/);
+  });
+
+  it('accepts asc/desc case-insensitively', () => {
+    expect(QueryBuilder.build({ sort: [{ a: 'asc' }, { b: 'DESC' }] }).order)
+      .to.deep.equal([['a', 'ASC'], ['b', 'DESC']]);
+  });
+});
+
+describe('Hardening: limit/offset robustness', () => {
+  it('falls back to default on a non-integer size', () => {
+    expect(QueryBuilder.build({ size: 2.9 }).limit).to.equal(100);
+    expect(QueryBuilder.build({ size: '10abc' }).limit).to.equal(100);
+  });
+
+  it('preserves a large integer size (no parseInt truncation)', () => {
+    expect(QueryBuilder.build({ size: 1e21 }).limit).to.equal(1e21);
+  });
+
+  it('falls back to default offset on a non-integer from', () => {
+    expect(QueryBuilder.build({ from: 1.5 }).offset).to.equal(0);
+  });
+});
+
+describe('Hardening: or/not nested predicate', () => {
+  it('recurses an or operand object instead of stringifying it', () => {
+    const where = QueryBuilder.getWhereQuery({ filters: { a: { or: { gt: 1 } } } });
+    // operand recursed to a real predicate, not the raw { gt: 1 } object
+    // (object filters are wrapped in Op.and by convention).
+    expect(where.a[Op.and][0][Op.or][Op.and][0][Op.gt]).to.equal(1);
+  });
+
+  it('keeps the array form of or unchanged', () => {
+    const where = QueryBuilder.getWhereQuery({ filters: { a: { or: [60, 130] } } });
+    expect(where.a[Op.and][0][Op.or]).to.deep.equal([60, 130]);
+  });
+});

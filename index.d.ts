@@ -41,8 +41,12 @@ export interface BuiltQuery {
 export type AggregateFn = 'count' | 'countDistinct' | 'sum' | 'avg' | 'min' | 'max';
 export type DateInterval = 'hour' | 'day' | 'week' | 'month' | 'quarter' | 'year';
 
-// Future: extend the date-bucket form with `timezone`, and add a JSONB form { field, path }.
-export type GroupByField = string | { field: string; interval: DateInterval };
+// Date-bucket form takes an optional `timezone` (default 'UTC') so DATE_TRUNC boundaries
+// are deterministic regardless of the DB session timezone (PostgreSQL 14+).
+// Future: add a JSONB form { field, path }.
+export type GroupByField =
+  | string
+  | { field: string; interval: DateInterval; timezone?: string };
 
 // Future: extend the object form with `distinct` and `cast`.
 export type MetricSpec = 'count' | { fn: AggregateFn; field?: string };
@@ -61,6 +65,10 @@ export interface AggregationParams {
   metrics?: Record<string, MetricSpec>;
   having?: Record<string, HavingPredicate>;
   coerceNumbers?: boolean;
+  // attribute -> DB column, for models whose attributes differ from their columns
+  // (e.g. `underscored` snake_case). Applied to col() in metric targets and date-bucket
+  // dimensions. Plain groupBy dimensions are mapped by Sequelize itself, so they need no entry.
+  fieldMap?: Record<string, string>;
 }
 
 export type AggregationAttribute = string | [Fn | Col, string];
@@ -73,8 +81,8 @@ export interface BuiltAggregation {
   order: Order | null;
   raw: true;
   subQuery: false;
-  limit: number;
-  offset: number;
+  limit?: number;  // present only when `size` was provided — else all groups
+  offset?: number; // present only when `from` was provided
 }
 
 export type AggregationRow = Record<string, unknown>;
@@ -91,6 +99,10 @@ export interface FacetSpec {
 
 export interface SearchParams extends QueryParams {
   facets?: Record<string, FacetSpec>;
+  // attribute -> DB column for facet fields (terms value/group, stats min/max/avg).
+  // The facet's response key stays the attribute name; the WHERE/disjunctive drop also
+  // keys on the attribute (Sequelize maps it). See AggregationParams.fieldMap.
+  fieldMap?: Record<string, string>;
 }
 
 export interface FacetQuerySpec {

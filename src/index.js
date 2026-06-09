@@ -1,4 +1,4 @@
-import { AGG_FUNCTIONS, DATE_INTERVALS, COERCIBLE_FNS } from './constants.js';
+import { AGG_FUNCTIONS, DATE_INTERVALS, COERCIBLE_FNS, HAVING_OPERATORS } from './constants.js';
 import { toNumber, normalizeGroupBy } from './helpers.js';
 
 class QueryBuilder {
@@ -81,7 +81,13 @@ class QueryBuilder {
       for (const [nestedKey, nestedValue] of Object.entries(value)) {
         const sequelizeOp = QueryBuilder.getSequelizeOpByString(nestedKey);
         if (sequelizeOp) {
-          objectQuery.push({ [sequelizeOp]: nestedValue });
+          // or/not take sub-PREDICATES, not a scalar — recurse so a nested operator
+          // object ({ or: { gt: 1 } }) builds real clauses instead of stringifying to
+          // '[object Object]'. Scalars and plain value-arrays pass through untouched.
+          const operand = (nestedKey === 'or' || nestedKey === 'not')
+            ? QueryBuilder.buildLogicalOperand(nestedValue)
+            : nestedValue;
+          objectQuery.push({ [sequelizeOp]: operand });
         } else {
           objectQuery.push({ [nestedKey]: QueryBuilder.buildWhereClause(nestedKey, nestedValue) });
         }
@@ -91,6 +97,16 @@ class QueryBuilder {
     }
 
     return { [QueryBuilder.Op.eq]: value };
+  }
+
+  // Build the operand of an or/not operator. An array maps each element (objects become
+  // predicates, scalars stay scalars); a bare object becomes a single predicate. This
+  // keeps `{ or: [60, 130] }` as `[60, 130]` while turning `{ or: { gt: 1 } }` into a
+  // real clause instead of letting Sequelize stringify the raw object.
+  static buildLogicalOperand (value) {
+    const toPredicate = (v) =>
+      (v !== null && typeof v === 'object') ? QueryBuilder.buildWhereClause(null, v) : v;
+    return Array.isArray(value) ? value.map(toPredicate) : toPredicate(value);
   }
 
   // TODO better handle object type and operator
@@ -115,25 +131,36 @@ class QueryBuilder {
     if (!sort) {
       return null;
     }
+    if (!Array.isArray(sort)) {
+      throw new Error('sort must be an array of { field: direction } objects');
+    }
     const order = [];
     sort.forEach((item) => {
       Object.entries(item).forEach(([key, value]) => {
+        if (typeof value !== 'string' || !/^(asc|desc)$/i.test(value)) {
+          throw new Error(`sort direction for "${key}" must be 'ASC' or 'DESC'`);
+        }
         order.push([key, value.toUpperCase()]);
       });
     });
     return order;
   }
 
+  // Parse a paging value (from/size). parseInt would silently corrupt floats ('2.9' -> 2)
+  // and scientific notation (1e21 -> 1), so use Number + an integer check.
+  static toPagingInt (value, fallback) {
+    const n = Number(value);
+    return Number.isInteger(n) && n >= 0 ? n : fallback;
+  }
+
   // from: 0;
   static getOffsetQuery (params, defaultOffset = 0) {
-    const offset = parseInt(params.from, 10);
-    return Number.isInteger(offset) && offset >= 0 ? offset : defaultOffset;
+    return QueryBuilder.toPagingInt(params.from, defaultOffset);
   }
 
   // size: 100;
   static getLimitQuery (params, defaultLimit = 100) {
-    const limit = parseInt(params.size, 10);
-    return Number.isInteger(limit) && limit >= 0 ? limit : defaultLimit;
+    return QueryBuilder.toPagingInt(params.size, defaultLimit);
   }
 
   // attributes: ['id', 'name', 'email'];
@@ -161,22 +188,36 @@ class QueryBuilder {
     }
   }
 
+  // Resolve an attribute name to its real DB column via the optional fieldMap.
+  // kuuliza stays schema-agnostic: a caller whose Sequelize model uses `field:`
+  // mapping (e.g. underscored snake_case columns) passes { attr: dbColumn } so the
+  // identifiers wrapped in col() target the real column instead of the camelCase
+  // attribute. Plain groupBy dimensions are NOT resolved here — they ride Sequelize's
+  // own attribute->field mapping (bare string in SELECT + GROUP BY by output alias).
+  static resolveField (fieldMap, field) {
+    const mapped = fieldMap && fieldMap[field];
+    // Only a non-empty string is a usable column; ignore numbers/''/0 (which would
+    // emit col(123) or silently fall through) and fall back to the attribute name.
+    return (typeof mapped === 'string' && mapped) ? mapped : field;
+  }
+
   // metric spec: 'count' (shorthand -> COUNT(*)) | { fn, field }
   // Returns { entry: [expr, alias], expr } — expr is cached so HAVING can reuse it.
-  static buildMetric (alias, spec) {
+  static buildMetric (alias, spec, fieldMap) {
     const { fn, col, literal } = QueryBuilder;
     const normalized = typeof spec === 'string' ? { fn: spec } : (spec || {});
     const fnName = normalized.fn;
     const field = normalized.field;
+    const column = field && QueryBuilder.resolveField(fieldMap, field);
 
     let expr;
     if (fnName === 'count') {
-      expr = field ? fn('COUNT', col(field)) : fn('COUNT', literal('*'));
+      expr = field ? fn('COUNT', col(column)) : fn('COUNT', literal('*'));
     } else if (fnName === 'countDistinct') {
       if (!field) {
         throw new Error(`Aggregate "${alias}": countDistinct requires a field`);
       }
-      expr = fn('COUNT', fn('DISTINCT', col(field)));
+      expr = fn('COUNT', fn('DISTINCT', col(column)));
     } else {
       const sqlFn = AGG_FUNCTIONS[fnName];
       if (!sqlFn) {
@@ -185,21 +226,23 @@ class QueryBuilder {
       if (!field) {
         throw new Error(`Aggregate "${alias}": ${fnName} requires a field`);
       }
-      expr = fn(sqlFn, col(field));
+      expr = fn(sqlFn, col(column));
     }
 
     return { entry: [expr, alias], expr };
   }
 
-  // groupBy entry: 'field' (plain column) | { field, interval } (date bucket)
+  // groupBy entry: 'field' (plain column) | { field, interval, timezone? } (date bucket)
   // Returns { attribute, group, name } — name is the output column / collision key.
-  static buildDimension (dim) {
+  // The date-bucket col() is resolved through fieldMap; the output alias stays the
+  // attribute name so callers keep camelCase row keys.
+  static buildDimension (dim, fieldMap) {
     const { fn, col } = QueryBuilder;
     if (typeof dim === 'string') {
       return { attribute: dim, group: dim, name: dim };
     }
 
-    const { field, interval } = dim || {};
+    const { field, interval, timezone = 'UTC' } = dim || {};
     if (!field) {
       throw new Error('groupBy dimension requires a field');
     }
@@ -207,7 +250,9 @@ class QueryBuilder {
       throw new Error(`Unsupported date interval: ${interval}. Use one of: ${[...DATE_INTERVALS].join(', ')}`);
     }
 
-    const expr = fn('DATE_TRUNC', interval, col(field));
+    // 3-arg DATE_TRUNC pins buckets to an explicit timezone (default UTC) so boundaries
+    // are deterministic regardless of the DB session's TimeZone. Requires PostgreSQL 14+.
+    const expr = fn('DATE_TRUNC', interval, col(QueryBuilder.resolveField(fieldMap, field)), timezone);
     return { attribute: [expr, field], group: expr, name: field };
   }
 
@@ -224,12 +269,14 @@ class QueryBuilder {
       if (!expr) {
         throw new Error(`having references unknown metric "${alias}"`);
       }
+      if (predicate === null || typeof predicate !== 'object' || Array.isArray(predicate)) {
+        throw new Error(`having predicate for "${alias}" must be an object like { gte: 10 }`);
+      }
       Object.entries(predicate).forEach(([op, value]) => {
-        const sequelizeOp = QueryBuilder.getSequelizeOpByString(op);
-        if (!sequelizeOp) {
+        if (!HAVING_OPERATORS.has(op)) {
           throw new Error(`Unsupported having operator: ${op}`);
         }
-        clauses.push(where(expr, sequelizeOp, value));
+        clauses.push(where(expr, QueryBuilder.getSequelizeOpByString(op), value));
       });
     });
 
@@ -245,15 +292,22 @@ class QueryBuilder {
   static buildAggregation (params) {
     QueryBuilder.assertAggregationReady();
 
-    const dims = normalizeGroupBy(params.groupBy).map((d) => QueryBuilder.buildDimension(d));
+    const fieldMap = params.fieldMap;
+    const dims = normalizeGroupBy(params.groupBy).map((d) => QueryBuilder.buildDimension(d, fieldMap));
     const dimNames = new Set(dims.map((d) => d.name));
+    // Two dimensions sharing an output name (e.g. a plain field and a date bucket on the
+    // same field) would emit duplicate "... AS x" columns and silently overwrite each
+    // other under raw:true. Reject it rather than lose data.
+    if (dimNames.size !== dims.length) {
+      throw new Error('groupBy dimensions collide on an output name — each must be unique');
+    }
 
     const exprByAlias = {};
     const metricEntries = Object.entries(params.metrics || {}).map(([alias, spec]) => {
       if (dimNames.has(alias)) {
         throw new Error(`Metric alias "${alias}" collides with a groupBy field`);
       }
-      const { entry, expr } = QueryBuilder.buildMetric(alias, spec);
+      const { entry, expr } = QueryBuilder.buildMetric(alias, spec, fieldMap);
       exprByAlias[alias] = expr;
       return entry;
     });
@@ -277,10 +331,18 @@ class QueryBuilder {
       where: QueryBuilder.getWhereQuery(params),
       order: QueryBuilder.getOrderQuery(params),
       raw: true,
-      subQuery: false,
-      limit: QueryBuilder.getLimitQuery(params),
-      offset: QueryBuilder.getOffsetQuery(params)
+      subQuery: false
     };
+
+    // Paging is OPT-IN over groups: apply limit/offset only when the caller asks.
+    // A bare aggregation returns EVERY group — a default limit would silently
+    // truncate faceted counts (e.g. per-status totals for a page of requests).
+    if (params.size !== undefined) {
+      result.limit = QueryBuilder.getLimitQuery(params);
+    }
+    if (params.from !== undefined) {
+      result.offset = QueryBuilder.getOffsetQuery(params);
+    }
 
     if (dims.length) {
       result.group = dims.map((d) => d.group);
@@ -339,19 +401,23 @@ class QueryBuilder {
     QueryBuilder.assertAggregationReady();
     const { fn, col, literal } = QueryBuilder;
 
+    const fieldMap = params.fieldMap;
     const facets = Object.entries(params.facets || {}).map(([field, rawFacet]) => {
       const facet = rawFacet || {};
       const type = facet.type || 'terms';
       const disjunctive = facet.disjunctive !== undefined ? facet.disjunctive : type === 'terms';
+      // buildFacetWhere keys on the attribute name (the filters key + Sequelize Op
+      // mapping), so it takes the raw field, not the resolved column.
       const where = QueryBuilder.buildFacetWhere(field, { disjunctive }, params);
+      const column = QueryBuilder.resolveField(fieldMap, field);
 
       let options;
       if (type === 'stats') {
         options = {
           attributes: [
-            [fn('MIN', col(field)), 'min'],
-            [fn('MAX', col(field)), 'max'],
-            [fn('AVG', col(field)), 'avg'],
+            [fn('MIN', col(column)), 'min'],
+            [fn('MAX', col(column)), 'max'],
+            [fn('AVG', col(column)), 'avg'],
             [fn('COUNT', literal('*')), 'count']
           ],
           where,
@@ -361,11 +427,11 @@ class QueryBuilder {
       } else if (type === 'terms') {
         options = {
           attributes: [
-            [col(field), 'value'],
+            [col(column), 'value'],
             [fn('COUNT', literal('*')), 'count']
           ],
           where,
-          group: [field],
+          group: [column],
           order: [[fn('COUNT', literal('*')), 'DESC']],
           limit: facet.limit !== undefined ? facet.limit : 10,
           raw: true,

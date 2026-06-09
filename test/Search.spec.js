@@ -92,6 +92,46 @@ describe('buildSearch', () => {
     expect(s.facets[0].type).to.equal('terms');
     expect(s.facets[0].options.limit).to.equal(10);
   });
+
+  describe('fieldMap (attribute -> DB column)', () => {
+    it('maps a terms facet field (col + group) but keeps the response name', () => {
+      const s = QueryBuilder.buildSearch({
+        facets: { brandId: { type: 'terms' } },
+        fieldMap: { brandId: 'brand_id' }
+      });
+      const f = s.facets[0];
+      expect(f.name).to.equal('brandId');
+      expect(f.options.attributes[0][0].col).to.equal('brand_id');
+      expect(f.options.attributes[0][1]).to.equal('value');
+      expect(f.options.group).to.deep.equal(['brand_id']);
+    });
+
+    it('maps a stats facet field through fieldMap', () => {
+      const s = QueryBuilder.buildSearch({
+        facets: { unitPrice: { type: 'stats' } },
+        fieldMap: { unitPrice: 'unit_price' }
+      });
+      const a = s.facets[0].options.attributes;
+      expect(a[0][0].args[0].col).to.equal('unit_price'); // MIN
+      expect(a[1][0].args[0].col).to.equal('unit_price'); // MAX
+      expect(a[2][0].args[0].col).to.equal('unit_price'); // AVG
+    });
+
+    it('disjunctive drop still keys on the attribute name, not the mapped column', () => {
+      const s = QueryBuilder.buildSearch({
+        filters: { brandId: 'X' },
+        facets: { brandId: { type: 'terms', disjunctive: true } },
+        fieldMap: { brandId: 'brand_id' }
+      });
+      expect(s.facets[0].options.where?.brandId).to.equal(undefined);
+    });
+
+    it('leaves facet fields unchanged without a fieldMap entry', () => {
+      const s = QueryBuilder.buildSearch({ facets: { brand: { type: 'terms' } } });
+      expect(s.facets[0].options.attributes[0][0].col).to.equal('brand');
+      expect(s.facets[0].options.group).to.deep.equal(['brand']);
+    });
+  });
 });
 
 describe('assembleSearch', () => {

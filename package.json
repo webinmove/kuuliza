@@ -1,15 +1,27 @@
 {
   "name": "@webinmove/kuuliza",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Library to expose sequelize queriing abilities in controller",
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
   "directories": {
     "test": "test",
     "dist": "dist"
   },
   "scripts": {
     "build": "rollup --config --bundleConfigAsCjs",
-    "test": "LOG_LEVEL=fatal mocha"
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run test:lint && npm run test:spec",
+    "format": "semistandard --fix",
+    "test:spec": "LOG_LEVEL=fatal mocha \"test/*.spec.js\"",
+    "test:lint": "semistandard --verbose | snazzy",
+    "test:cover": "c8 npm run test:spec",
+    "test:integration": "LOG_LEVEL=fatal mocha \"test/integration/**/*.spec.js\" --timeout 120000",
+    "test:integration:cover": "c8 --check-coverage --lines 92 --statements 92 --branches 80 --functions 100 --reporter=text-summary npm run test:integration",
+    "test:cover:all": "LOG_LEVEL=fatal c8 mocha \"test/*.spec.js\" \"test/integration/**/*.spec.js\" --timeout 120000",
+    "test": "npm run test:lint && npm run test:cover"
   },
   "exports": {
     "import": "./dist/index.mjs",
@@ -40,22 +52,46 @@
     "url": "https://github.com/webinmove/kuuliza/issues"
   },
   "homepage": "https://github.com/webinmove/kuuliza#readme",
+  "c8": {
+    "reporter": [
+      "text",
+      "lcov"
+    ],
+    "include": [
+      "src/**/*.js"
+    ],
+    "extension": [
+      ".js"
+    ],
+    "all": true,
+    "check-coverage": true,
+    "lines": 100,
+    "functions": 100,
+    "branches": 99,
+    "statements": 100
+  },
   "semistandard": {
     "globals": [
       "describe",
       "it",
       "before",
-      "after"
+      "after",
+      "beforeEach",
+      "afterEach"
     ],
     "ignore": "dist"
   },
   "devDependencies": {
-    "chai": "4.0.0",
-    "mocha": "7.2.0",
+    "@testcontainers/postgresql": "12.0.1",
+    "c8": "11.0.0",
+    "chai": "6.2.2",
+    "mocha": "11.7.6",
     "mocha-standard": "1.0.0",
-    "rollup": "4.60.1",
+    "pg": "8.21.0",
+    "pg-hstore": "2.3.4",
+    "rollup": "4.61.1",
     "semistandard": "17.0.0",
     "sequelize": "6.37.8",
-    "snazzy": "7.0.0"
+    "snazzy": "9.0.0"
   }
 }

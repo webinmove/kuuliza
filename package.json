@@ -1,6 +1,6 @@
 {
   "name": "@webinmove/kuuliza",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Library to expose sequelize queriing abilities in controller",
   "type": "module",
   "engines": {
